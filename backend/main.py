@@ -28,11 +28,17 @@ app = FastAPI(
 )
 
 # --- CORS Middleware ---
+# Lê a URL do frontend a partir das variáveis de ambiente
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
 origins = [
     "http://localhost:3000",
     "http://localhost:3001",
-    # Adicione a URL de produção do seu frontend aqui
 ]
+
+# Adiciona a URL de produção à lista de origens se estiver definida
+if FRONTEND_URL not in origins:
+    origins.append(FRONTEND_URL)
 
 app.add_middleware(
     CORSMiddleware,
