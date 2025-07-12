@@ -9,6 +9,7 @@ from typing import List, Optional
 
 import httpx
 from dotenv import load_dotenv
+from groq import Groq
 from PIL import Image
 from pydantic import BaseModel, Field, ValidationError
 
@@ -22,9 +23,8 @@ load_dotenv()
 
 # --- Configura
 es da LLM ---
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-LLM_API_URL = "https://api.openai.com/v1/chat/completions"
-LLM_MODEL = "gpt-4o-mini"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+LLM_MODEL = "llama-3.1-8b-instant"
 
 # Prompt para a LLM (ajustado para focar apenas na extra
 o de campos brutos)
@@ -162,7 +162,7 @@ def format_date_to_yyyymmdd(date_str: str) -> Optional[str]:
     # Remove tags como [REVISAR] antes de tentar parsear
     cleaned_date_str = re.sub(r'\[.*?\]', '', date_str).strip()
 
-    formats = ["%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"]
+    formats = ["%d/%m/%Y", "%d-%m/%Y", "%Y-%m-%d"]
     for fmt in formats:
         try:
             return datetime.strptime(cleaned_date_str, fmt).strftime("%Y-%m-%d")
@@ -230,74 +230,85 @@ async def call_llm_for_json_extraction(raw_text: str) -> dict:
     """
     Chama a API da LLM para extrair e estruturar dados em JSON.
     """
-    if not OPENAI_API_KEY:
-        return {"success": False, "error": "OPENAI_API_KEY n
+    if not GROQ_API_KEY:
+        return {"success": False, "error": "GROQ_API_KEY n
 o configurada. N
 o 
  poss
 vel chamar a LLM.", "raw_ocr_text": raw_text}
 
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
+    client = Groq(api_key=GROQ_API_KEY)
     formatted_prompt = LLM_PROMPT_TEMPLATE.format(raw_text_input=raw_text)
 
-    payload = {
-        "model": LLM_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": formatted_prompt
-            }
-        ],
-        "response_format": { "type": "json_object" }
-    }
+    try:
+        completion = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": formatted_prompt
+                }
+            ],
+            temperature=1,
+            max_tokens=3521,
+            top_p=1,
+            stream=True,
+            stop=None,
+        )
 
-    async with httpx.AsyncClient() as client:
+        llm_response_content = ""
+        for chunk in completion:
+            llm_response_content += chunk.choices[0].delta.content or ""
+
         try:
-            response = await client.post(LLM_API_URL, headers=headers, json=payload, timeout=60.0)
-            response.raise_for_status()
-            llm_response_content = response.json()["choices"][0]["message"]["content"]
-            
-            try:
-                parsed_json = json.loads(llm_response_content)
+            # Tenta encontrar o JSON na resposta da LLM usando regex
+            json_match = re.search(r'\{.*\}', llm_response_content, re.DOTALL)
+            if json_match:
+                json_string = json_match.group(0)
+                parsed_json = json.loads(json_string)
                 return parsed_json
-            except json.JSONDecodeError:
+            else:
                 if "Erro 0001" in llm_response_content:
                     return {"success": False, "error": llm_response_content}
                 else:
-                    return {"success": False, "error": f"Resposta da LLM n
+                    return {"success": False, "error": f"Nenhum JSON encontrado na resposta da LLM: {llm_response_content}"}
+        except json.JSONDecodeError:
+            if "Erro 0001" in llm_response_content:
+                return {"success": False, "error": llm_response_content}
+            else:
+                return {"success": False, "error": f"Resposta da LLM n
 o 
  um JSON v
 lido: {llm_response_content}"}
 
-        except httpx.RequestError as exc:
-            return {"success": False, "error": f"Erro de rede ou requisi
-o para a LLM: {exc}"}
-        except httpx.HTTPStatusError as exc:
-            return {"success": False, "error": f"Erro na API da LLM - Status {exc.response.status_code}: {exc.response.text}"}
-        except Exception as e:
-            return {"success": False, "error": f"Erro inesperado ao chamar a LLM: {str(e)}"}
+    except Exception as e:
+        return {"success": False, "error": f"Erro inesperado ao chamar a LLM: {str(e)}"}
 
 # --- Main Task Function for RQ ---
-async def process_single_document_task(image_bytes_b64: str) -> dict:
+async def process_single_document_task(file_bytes_b64: str, content_type: str) -> dict:
     """
-    Processa uma 
-nica imagem (base64) com Doctr e LLM.
+    Processa um 
+nico arquivo (imagem ou PDF) com Doctr e LLM.
     Esta fun
 o ser
  enfileirada pelo RQ.
     """
     try:
-        # 1. Decodificar a imagem base64
-        image_bytes = io.BytesIO(base64.b64decode(image_bytes_b64))
-        pil_image = Image.open(image_bytes)
+        # 1. Decodificar o arquivo base64
+        file_bytes = base64.b64decode(file_bytes_b64)
 
-        # 2. Processamento com Doctr
+        # 2. Processamento com Doctr de acordo com o content_type
         predictor = get_doctr_predictor()
-        doc = DocumentFile.from_images([pil_image])
+        
+        if content_type.startswith("image/"):
+            doc = DocumentFile.from_images([file_bytes])
+        elif content_type == "application/pdf":
+            doc = DocumentFile.from_pdf(file_bytes)
+        else:
+            return {"success": False, "error": f"Tipo de conte
+do n
+o suportado: {content_type}"}
+
         result = predictor(doc)
 
         raw_ocr_text = ""

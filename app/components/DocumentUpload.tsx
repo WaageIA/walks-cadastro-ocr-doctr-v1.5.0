@@ -163,7 +163,9 @@ export default function DocumentUpload({
       const documentsToUpload: { [key: string]: File } = {};
       for (const [key, doc] of Object.entries(uploadedDocuments)) {
         if (doc && doc.file) {
-          documentsToUpload[key] = doc.file;
+          // Renomear arquivo para incluir documentKey para parsing no backend
+          const fileWithKey = new File([doc.file], `${key}_${doc.file.name}`, { type: doc.file.type });
+          documentsToUpload[key] = fileWithKey;
         }
       }
 
@@ -173,44 +175,46 @@ export default function DocumentUpload({
       });
 
       const response = await apiClient.processDocuments(documentsToUpload);
-      const jobIds = response.job_ids;
+      const jobsToPoll = response.jobs; // Agora inclui document_key
 
       toast({
         title: "Documentos enfileirados!",
         description: "O processamento OCR foi iniciado em segundo plano.",
       });
 
-      // Polling para verificar o status dos jobs
-      const pollJobs = async (jobIds: any[]) => {
-        const results = await Promise.all(jobIds.map(async (job: any) => {
-          while (true) {
-            await new Promise(resolve => setTimeout(resolve, 2000)); // espera 2 segundos
+      const successfulResults: { document_key: string; result: any }[] = [];
+      const failedJobs: { document_key: string; error: string }[] = [];
+      let pendingJobs = [...jobsToPoll];
+
+      const pollInterval = setInterval(async () => {
+        if (pendingJobs.length === 0) {
+          clearInterval(pollInterval);
+          handleAllJobsCompleted(successfulResults, failedJobs);
+          return;
+        }
+
+        const currentPendingJobs = [...pendingJobs];
+        pendingJobs = []; // Reset para a próxima iteração
+
+        const pollPromises = currentPendingJobs.map(async (job) => {
+          try {
             const statusResponse = await apiClient.getJobStatus(job.job_id);
             if (statusResponse.status === 'finished') {
-              return statusResponse.result;
+              successfulResults.push({ document_key: job.document_key, result: statusResponse.result });
             } else if (statusResponse.status === 'failed') {
-              throw new Error(`Job ${job.job_id} falhou: ${statusResponse.error}`);
+              failedJobs.push({ document_key: job.document_key, error: statusResponse.error });
+            } else {
+              // Ainda pendente, adicionar de volta para a próxima verificação
+              pendingJobs.push(job);
             }
+          } catch (error) {
+            // Erro de rede ou API durante o polling
+            failedJobs.push({ document_key: job.document_key, error: error instanceof Error ? error.message : "Erro desconhecido ao verificar status." });
           }
-        }));
-        return results;
-      };
+        });
 
-      const ocrResults = await pollJobs(jobIds);
-
-      // Simplesmente agregando os resultados. Pode precisar de uma lógica mais sofisticada
-      // dependendo da estrutura de `result` de cada job.
-      const aggregatedData = ocrResults.reduce((acc, result) => {
-        return { ...acc, ...result };
-      }, {});
-
-      setIsProcessing(false);
-      onDocumentsProcessed({ data: aggregatedData });
-
-      toast({
-        title: "Documentos processados!",
-        description: "Dados extraídos com sucesso.",
-      });
+        await Promise.allSettled(pollPromises); // Esperar todas as verificações atuais completarem
+      }, 2000); // Verificar a cada 2 segundos
 
     } catch (error) {
       setIsProcessing(false);
@@ -220,6 +224,101 @@ export default function DocumentUpload({
         variant: "destructive",
       });
       console.error("Erro no processamento OCR:", error);
+    }
+  };
+
+  const handleAllJobsCompleted = (successfulResults: { document_key: string; result: any }[], failedJobs: { document_key: string; error: string }[]) => {
+    const mergedOcrData: any = {
+      nome_completo: null,
+      data_nascimento: null,
+      cpf: null,
+      empresa: null,
+      cnpj: null,
+      nome_comprovante: null,
+      cep: null,
+      complemento: null,
+    };
+
+    const allNeedsReview: string[] = [];
+
+    // Definir os campos que o OCR tenta extrair e sua ordem de prioridade (implícita pela ordem em documentTypes)
+    const ocrFieldMapping = {
+      nome_completo: "nomeCompleto",
+      data_nascimento: "dataNascimento",
+      cpf: "cpf",
+      empresa: "empresa",
+      cnpj: "cnpj",
+      nome_comprovante: "nomeComprovante",
+      cep: "cep",
+      complemento: "complemento",
+    };
+
+    // Mapear resultados bem-sucedidos por document_key para fácil acesso
+    const successfulResultsMap = new Map<string, any>();
+    successfulResults.forEach(res => {
+      successfulResultsMap.set(res.document_key, res.result.data);
+    });
+
+    // Iterar sobre os tipos de documento na ordem definida para aplicar prioridade na mesclagem
+    for (const docType of documentTypes) {
+      // Apenas documentos que são processados por OCR contribuem para os metadados
+      if (!docType.isOcrProcessed) continue;
+
+      const ocrResultData = successfulResultsMap.get(docType.key);
+      if (ocrResultData) {
+        for (const ocrField in ocrFieldMapping) {
+          if (ocrResultData.hasOwnProperty(ocrField)) {
+            const value = ocrResultData[ocrField];
+            // Apenas definir se o campo ainda não foi definido por um documento de maior prioridade
+            // e se o valor não é nulo/vazio/tag de erro
+            if ((mergedOcrData[ocrField] === null || mergedOcrData[ocrField] === undefined || mergedOcrData[ocrField] === "") &&
+                value !== null && value !== undefined && value !== "" &&
+                !String(value).toLowerCase().includes("[ilegível]") &&
+                !String(value).toLowerCase().includes("[não encontrado]") &&
+                !String(value).toLowerCase().includes("[não aplicável]"))
+            {
+              mergedOcrData[ocrField] = value;
+            }
+          }
+        }
+        if (ocrResultData.needs_review) {
+          allNeedsReview.push(...ocrResultData.needs_review);
+        }
+      }
+    }
+
+    // Calcular metadados finais
+    const totalOcrFields = Object.keys(ocrFieldMapping).length; // Total de campos que o OCR tenta extrair
+    let extractedOcrFields = 0;
+    for (const ocrField in ocrFieldMapping) {
+      const value = mergedOcrData[ocrField];
+      if (value !== null && value !== undefined && value !== "") {
+        extractedOcrFields++;
+      }
+    }
+
+    const confidenceScore = totalOcrFields > 0 ? Math.round(((extractedOcrFields - new Set(allNeedsReview).size) / totalOcrFields) * 100) : 0;
+
+    mergedOcrData.fields_extracted = extractedOcrFields;
+    mergedOcrData.fields_total = totalOcrFields;
+    mergedOcrData.confidence_score = Math.max(0, confidenceScore); // Garante que não seja negativo
+    mergedOcrData.needs_review = [...new Set(allNeedsReview)]; // Remover duplicatas
+
+    setIsProcessing(false);
+    onDocumentsProcessed({ data: mergedOcrData });
+
+    if (failedJobs.length > 0) {
+      toast({
+        title: "Processamento OCR concluído com erros",
+        description: `Alguns documentos falharam: ${failedJobs.map(j => j.document_key).join(', ')}. Verifique o console para detalhes.`, 
+        variant: "destructive",
+      });
+      console.error("Detalhes dos jobs falhos:", failedJobs);
+    } else {
+      toast({
+        title: "Documentos processados!",
+        description: "Dados extraídos com sucesso.",
+      });
     }
   };
 

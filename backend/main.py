@@ -74,33 +74,48 @@ async def health_check():
 @app.post("/api/v1/ocr/process-documents", tags=["OCR"])
 async def process_documents(files: List[UploadFile] = File(...)):
     """
-    Recebe múltiplos documentos, enfileira-os para processamento assíncrono com Doctr e LLM.
+    Recebe múltiplos documentos (imagens ou PDFs), enfileira-os para processamento assíncrono.
     """
     if not files:
         raise HTTPException(status_code=400, detail="Nenhum arquivo enviado.")
 
     job_ids = []
+    # Usar um dicionário para rastrear arquivos por um identificador único se necessário
+    # Por simplicidade, vamos assumir que o `file.name` pode ser usado para mapeamento,
+    # mas o ideal seria o frontend enviar uma chave para cada arquivo.
+    # Vamos adaptar para que o frontend envie `key:file` no form-data.
+
+    # O frontend precisa enviar os arquivos com chaves, ex: `rg: file_bytes`, `cnpj: file_bytes`
+    # Como o `files: List[UploadFile]` não preserva as chaves originais do form-data,
+    # vamos ter que confiar no `file.filename` ou ajustar o lado do cliente.
+    # Para uma solução robusta, o cliente deve enviar metadados.
+    # Por agora, vamos assumir que o `file.name` contém a chave que precisamos.
+
     for file in files:
-        if not file.content_type.startswith("image/"):
-            raise HTTPException(status_code=400, detail=f"Tipo de arquivo inválido para {file.filename}. Apenas imagens são permitidas.")
+        # Valida se o tipo de arquivo é suportado (imagem ou PDF)
+        if not (file.content_type.startswith("image/") or file.content_type == "application/pdf"):
+            raise HTTPException(status_code=400, detail=f"Tipo de arquivo '{file.content_type}' para '{file.filename}' n
+o suportado. Apenas imagens e PDFs s
+o permitidos.")
 
         try:
-            image_bytes = await file.read()
-            # Codifica a imagem em base64 para passar para a tarefa RQ
-            image_bytes_b64 = base64.b64encode(image_bytes).decode("utf-8")
+            file_bytes = await file.read()
+            file_bytes_b64 = base64.b64encode(file_bytes).decode("utf-8")
             
-            # Enfileira a tarefa no RQ
-            job = rq_queue.enqueue(process_single_document_task, image_bytes_b64)
-            job_ids.append({"filename": file.filename, "job_id": job.id})
+            # Extrair a chave do documento do nome do arquivo (ex: "rg_documento.pdf" -> "rg")
+            document_key = file.filename.split('_')[0] if '_' in file.filename else file.filename
+
+            job = rq_queue.enqueue(process_single_document_task, file_bytes_b64, file.content_type)
+            job_ids.append({"document_key": document_key, "filename": file.filename, "job_id": job.id})
 
         except Exception as e:
-            # Se houver um erro ao enfileirar um arquivo, registra e continua com os outros
+            document_key = file.filename.split('_')[0] if '_' in file.filename else file.filename
             print(f"Erro ao enfileirar {file.filename}: {str(e)}")
-            job_ids.append({"filename": file.filename, "job_id": None, "error": str(e)})
+            job_ids.append({"document_key": document_key, "filename": file.filename, "job_id": None, "error": str(e)})
 
     return JSONResponse(content={
         "message": "Documentos enfileirados para processamento.",
-        "job_ids": job_ids
+        "jobs": job_ids
     }, status_code=202)
 
 # --- Endpoint para verificar o status de um job RQ ---
