@@ -1,173 +1,117 @@
 /**
- * Cliente API para comunicação com n8n webhook
+ * Cliente API para comunicação com o backend FastAPI de OCR.
  */
 
-interface N8nConfig {
-  webhookUrl: string
-  timeout: number
-  retries: number
+interface ApiConfig {
+  baseUrl: string;
+  timeout: number;
 }
 
-class N8nClient {
-  private config: N8nConfig
-  private correlationId: string
+class ApiClient {
+  private config: ApiConfig;
 
-  constructor(config?: Partial<N8nConfig>) {
+  constructor(config?: Partial<ApiConfig>) {
     this.config = {
-      webhookUrl:
-        process.env.NEXT_PUBLIC_N8N_WEBHOOK_URL || "https://webhook.escalasdigitaischatboot.uk/webhook/doc-ocr-dados",
-      timeout: 60000, // 60 segundos para OCR
-      retries: 2,
+      baseUrl: process.env.NEXT_PUBLIC_OCR_API_URL || "http://localhost:8000",
+      timeout: 60000, // 60 segundos
       ...config,
-    }
-    this.correlationId = this.generateCorrelationId()
+    };
   }
 
-  private generateCorrelationId(): string {
-    return `web-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
-  }
-
-  private async fetchWithRetry(
-    url: string,
-    options: RequestInit,
-    retries: number = this.config.retries,
-  ): Promise<Response> {
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), this.config.timeout)
+  private async fetchWithTimeout(url: string, options: RequestInit): Promise<Response> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.config.timeout);
 
     try {
       const response = await fetch(url, {
         ...options,
         signal: controller.signal,
-        headers: {
-          "Content-Type": "application/json",
-          "X-Correlation-ID": this.correlationId,
-          ...options.headers,
-        },
-      })
-
-      clearTimeout(timeoutId)
-      return response
+      });
+      clearTimeout(timeoutId);
+      return response;
     } catch (error) {
-      clearTimeout(timeoutId)
-
-      if (retries > 0 && (error instanceof TypeError || error.name === "AbortError")) {
-        console.warn(`Tentativa falhou, tentando novamente... (${retries} tentativas restantes)`)
-        await new Promise((resolve) => setTimeout(resolve, 2000))
-        return this.fetchWithRetry(url, options, retries - 1)
-      }
-
-      throw error
+      clearTimeout(timeoutId);
+      throw error;
     }
   }
 
-  async processDocuments(documents: Record<string, string>) {
-    if (!this.config.webhookUrl) {
-      throw new Error("URL do webhook n8n não configurada. Configure NEXT_PUBLIC_N8N_WEBHOOK_URL")
-    }
+  async processDocuments(documents: { [key: string]: File }): Promise<any> {
+    const formData = new FormData();
+    Object.entries(documents).forEach(([key, file]) => {
+      formData.append("files", file, file.name);
+    });
 
-    // Preparar payload para n8n
-    const payload = {
-      correlation_id: this.correlationId,
-      timestamp: new Date().toISOString(),
-      documents: documents,
-      document_types: Object.keys(documents),
-      total_documents: Object.keys(documents).length,
-    }
-
-    const response = await this.fetchWithRetry(this.config.webhookUrl, {
+    const response = await this.fetchWithTimeout(`${this.config.baseUrl}/api/v1/ocr/process-documents`, {
       method: "POST",
-      body: JSON.stringify(payload),
-    })
+      body: formData,
+    });
 
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}))
-      throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`)
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
     }
 
-    const result = await response.json()
-
-    // Padronizar resposta para compatibilidade com componente
-    return {
-      success: true,
-      data: result,
-      correlation_id: this.correlationId,
-      processed_at: new Date().toISOString(),
-    }
+    return response.json();
   }
 
-  async healthCheck() {
-    if (!this.config.webhookUrl) {
-      return {
-        ok: false,
-        status: 500,
-        data: { error: "Webhook URL não configurada" },
-      }
+  async getJobStatus(jobId: string): Promise<any> {
+    const response = await this.fetchWithTimeout(`${this.config.baseUrl}/api/v1/ocr/job-status/${jobId}`, {
+      method: "GET",
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
     }
 
+    return response.json();
+  }
+
+  async healthCheck(): Promise<HealthStatus> {
     try {
-      // Teste simples de conectividade
-      const testPayload = {
-        test: true,
-        correlation_id: this.correlationId,
-      }
-
-      const response = await this.fetchWithRetry(
-        this.config.webhookUrl,
-        {
-          method: "POST",
-          body: JSON.stringify(testPayload),
-        },
-        1,
-      )
-
+      const response = await this.fetchWithTimeout(`${this.config.baseUrl}/health`, {
+        method: "GET",
+      });
+      const data = await response.json();
       return {
         ok: response.ok,
         status: response.status,
-        data: response.ok ? await response.json() : null,
-      }
+        data,
+      };
     } catch (error) {
       return {
         ok: false,
         status: 500,
         data: { error: error instanceof Error ? error.message : "Erro desconhecido" },
-      }
+      };
     }
-  }
-
-  getCorrelationId(): string {
-    return this.correlationId
-  }
-
-  renewCorrelationId(): string {
-    this.correlationId = this.generateCorrelationId()
-    return this.correlationId
   }
 }
 
 // Instância singleton
-export const apiClient = new N8nClient()
+export const apiClient = new ApiClient();
 
 // Hook para usar em componentes React
 export function useApiClient() {
-  return apiClient
+  return apiClient;
 }
 
 // Tipos para TypeScript
-export interface N8nResponse {
-  success: boolean
-  data: any
-  correlation_id: string
-  processed_at: string
+export interface JobStatusResponse {
+  job_id: string;
+  status: "queued" | "started" | "finished" | "failed";
+  result: any;
+  error: string | null;
 }
 
 export interface HealthStatus {
-  ok: boolean
-  status: number
-  data: any
+  ok: boolean;
+  status: number;
+  data: any;
 }
 
 // Alias para compatibilidade com imports antigos
-export { apiClient as api }
+export { apiClient as api };
 // (opcional) também como default
-export default apiClient
+export default apiClient;
+

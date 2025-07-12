@@ -157,75 +157,71 @@ export default function DocumentUpload({
   const allDocumentsUploaded = Object.values(uploadedDocuments).every((doc) => doc !== null)
 
   const processDocuments = async () => {
-    setIsProcessing(true)
+    setIsProcessing(true);
 
     try {
-      // Converter documentos para base64
-      const documentsBase64: { [key: string]: string } = {}
-
+      const documentsToUpload: { [key: string]: File } = {};
       for (const [key, doc] of Object.entries(uploadedDocuments)) {
         if (doc && doc.file) {
-          const reader = new FileReader()
-          const base64Promise = new Promise<string>((resolve, reject) => {
-            reader.onload = () => {
-              const result = reader.result as string
-              resolve(result) // Manter formato completo data:type;base64,xxx
-            }
-            reader.onerror = reject
-          })
-          reader.readAsDataURL(doc.file)
-          documentsBase64[key] = await base64Promise
+          documentsToUpload[key] = doc.file;
         }
       }
 
       toast({
-        title: "Processando documentos...",
-        description: "Enviando para análise de OCR via n8n",
-      })
+        title: "Enviando documentos...",
+        description: "Seus documentos estão sendo enviados para o servidor.",
+      });
 
-      // Enviar diretamente para n8n (síncrono)
-      const result = await apiClient.processDocuments(documentsBase64)
+      const response = await apiClient.processDocuments(documentsToUpload);
+      const jobIds = response.job_ids;
 
-      if (result.success) {
-        setIsProcessing(false)
-        onDocumentsProcessed(result.data)
+      toast({
+        title: "Documentos enfileirados!",
+        description: "O processamento OCR foi iniciado em segundo plano.",
+      });
 
-        toast({
-          title: "Documentos processados!",
-          description: "Dados extraídos com sucesso via n8n",
-        })
+      // Polling para verificar o status dos jobs
+      const pollJobs = async (jobIds: any[]) => {
+        const results = await Promise.all(jobIds.map(async (job: any) => {
+          while (true) {
+            await new Promise(resolve => setTimeout(resolve, 2000)); // espera 2 segundos
+            const statusResponse = await apiClient.getJobStatus(job.job_id);
+            if (statusResponse.status === 'finished') {
+              return statusResponse.result;
+            } else if (statusResponse.status === 'failed') {
+              throw new Error(`Job ${job.job_id} falhou: ${statusResponse.error}`);
+            }
+          }
+        }));
+        return results;
+      };
 
-        // Verificar se há campos que precisam revisão
-        if (result.data.needs_review && result.data.needs_review.length > 0) {
-          toast({
-            title: "Atenção - Revisão necessária",
-            description: `Alguns campos precisam ser revisados: ${result.data.needs_review.join(", ")}`,
-            variant: "destructive",
-          })
-        }
-      } else {
-        throw new Error("Falha no processamento via n8n")
-      }
+      const ocrResults = await pollJobs(jobIds);
+
+      // Simplesmente agregando os resultados. Pode precisar de uma lógica mais sofisticada
+      // dependendo da estrutura de `result` de cada job.
+      const aggregatedData = ocrResults.reduce((acc, result) => {
+        return { ...acc, ...result };
+      }, {});
+
+      setIsProcessing(false);
+      onDocumentsProcessed({ data: aggregatedData });
+
+      toast({
+        title: "Documentos processados!",
+        description: "Dados extraídos com sucesso.",
+      });
+
     } catch (error) {
-      setIsProcessing(false)
-
-      if (error instanceof Error && error.message.includes("não configurada")) {
-        toast({
-          title: "Configuração necessária",
-          description: "Configure a URL do webhook n8n nas variáveis de ambiente",
-          variant: "destructive",
-        })
-      } else {
-        toast({
-          title: "Erro no processamento",
-          description: error instanceof Error ? error.message : "Erro desconhecido no OCR",
-          variant: "destructive",
-        })
-      }
-
-      console.error("Erro no OCR via n8n:", error)
+      setIsProcessing(false);
+      toast({
+        title: "Erro no processamento OCR",
+        description: error instanceof Error ? error.message : "Ocorreu um erro desconhecido.",
+        variant: "destructive",
+      });
+      console.error("Erro no processamento OCR:", error);
     }
-  }
+  };
 
   const handleAttachOnly = () => {
     // Passar null como dados OCR para indicar preenchimento manual
@@ -260,7 +256,7 @@ export default function DocumentUpload({
             <div className="flex items-center space-x-3">
               <Clock className="w-5 h-5 text-blue-600 animate-spin" />
               <div>
-                <p className="font-medium text-blue-900">Processando documentos via n8n...</p>
+                <p className="font-medium text-blue-900">Processando documentos com IA...</p>
                 <p className="text-sm text-blue-700">
                   Enviando {Object.keys(uploadedDocuments).filter(key => uploadedDocuments[key]).length} documentos para análise OCR
                 </p>
