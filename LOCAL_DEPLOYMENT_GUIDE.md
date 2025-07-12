@@ -24,7 +24,7 @@ Este guia detalha os passos para configurar e testar localmente o sistema de OCR
 2.  **Crie o arquivo `.env`:**
     Crie um arquivo chamado `.env` dentro do diretório `backend` com o seguinte conteúdo:
     ```
-    OPENAI_API_KEY="SUA_CHAVE_API_OPENAI_AQUI"
+    GROQ_API_KEY="SUA_CHAVE_API_GROQ_AQUI"
     REDIS_URL="redis://localhost:6379/0"
     ```
     *Substitua `SUA_CHAVE_API_OPENAI_AQUI` pela sua chave de API real da OpenAI.*
@@ -90,7 +90,7 @@ Este guia detalha os passos para configurar e testar localmente o sistema de OCR
 3.  **Testar o Endpoint de Processamento de Documentos:**
     *   Na página do Swagger UI (`/docs`), expanda o endpoint `POST /api/v1/ocr/process-documents`.
     *   Clique em "Try it out".
-    *   Clique em "Choose File" para selecionar uma ou mais imagens (RG, CNPJ, etc.) do seu computador.
+    *   Clique em "Choose File" para selecionar uma ou mais imagens (RG, CNPJ, etc.) ou PDFs do seu computador.
     *   Clique em "Execute".
     *   A resposta deve ser um `202 Accepted` com uma lista de `job_ids`.
 
